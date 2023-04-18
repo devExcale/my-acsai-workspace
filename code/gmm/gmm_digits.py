@@ -1,60 +1,199 @@
+from typing import Any, Callable
+
 from dotenv import load_dotenv
+from matplotlib import pyplot as plt
+from numpy import ndarray
+from sklearn.decomposition import PCA
 from sklearn.mixture import GaussianMixture
+from sklearn.preprocessing import StandardScaler
 
 from my_libs.images import *
 
 load_dotenv()
 
+
+def get_env(key: str, default: Any = None, cast: Callable[[str], Any] = None) -> Any:
+	var = os.environ.get(key)
+
+	if var is None:
+		return default
+
+	if cast is not None:
+		return cast(var)
+
+	return var
+
+
+def cast_bool(x: str) -> bool:
+	return x.lower() in ['true', 't', '1', 'yes', 'y']
+
+
+# TODO: move environment init to a class
 my_env = {
-	'SAMPLE_LIMIT': int(os.environ.get('GMM_DIGITS.SAMPLE_LIMIT', 0)),
-	'TEST_SAMPLE_LIMIT': int(os.environ.get('GMM_DIGITS.TEST_SAMPLE_LIMIT', 0)),
-	'SHOW_CENTROIDS': bool(os.environ.get('GMM_DIGITS.SHOW_CENTROIDS', False)),
-	'IMG_SCALE': int(os.environ.get('GMM_DIGITS.IMG_SCALE', 2)),
-	'GMM': {
-		'N_COMPONENTS': int(os.environ.get('GMM_DIGITS.GMM.N_COMPONENTS', 10)),
-		'N_INIT': int(os.environ.get('GMM_DIGITS.GMM.N_INIT', 10)),
-		'COVAR_TYPE': os.environ.get('GMM_DIGITS.GMM.COVAR_TYPE', 'full'),
+
+	# A multiplier on the showed size of the images
+	'IMG_SCALE': get_env('GMM_DIGITS.IMG_SCALE', default=2, cast=int),
+
+	# Whether to show the centroids
+	'SHOW_CENTROIDS': get_env('GMM_DIGITS.SHOW_CENTROIDS', default=True, cast=cast_bool),
+
+	# Wheter to test the resulting model (centroids will be always shown to map the labels)
+	'DO_TEST': get_env('GMM_DIGITS.DO_TEST', default=False, cast=cast_bool),
+
+	# Dataset parameters
+	'SAMPLE': {
+
+		# How many images to use for training (<= 0 means all)
+		'LIMIT_TRAIN': get_env('GMM_DIGITS.SAMPLE.LIMIT_TRAIN', default=0, cast=int),
+
+		# How many images to use for testing (<= 0 means all)
+		'LIMIT_TEST': get_env('GMM_DIGITS.SAMPLE.LIMIT_TEST', default=0, cast=int),
+
+		# The path to the dataset
+		'DATA_PATH': get_env('GMM_DIGITS.SAMPLE.DATA_PATH', default='../../assets/digits'),
+
 	},
+
+	# Gaussian Mixture parameters
+	'GMM': {
+
+		# The number of components in the Gaussian Mixture
+		'N_COMPONENTS': get_env('GMM_DIGITS.GMM.N_COMPONENTS', default=10, cast=int),
+
+		# How many times the Gaussian Mixture should be initialized
+		'N_INIT': get_env('GMM_DIGITS.GMM.N_INIT', default=5, cast=int),
+
+		# The initialization method for the Gaussian Mixture
+		'INIT_PARAMS': get_env('GMM_DIGITS.GMM.INIT_PARAMS', default='k-means++'),
+
+		# The covariance type for the Gaussian Mixture
+		'COVAR_TYPE': get_env('GMM_DIGITS.GMM.COVAR_TYPE', default='full'),
+
+	},
+
+	# Image processing parameters
+	'IMG': {
+
+		# Whether to invert the images
+		'INVERT': get_env('GMM_DIGITS.IMG.INVERT', default=False, cast=cast_bool),
+
+		# Whether to crop the images to the content
+		'CROP_CONTENT': get_env('GMM_DIGITS.IMG.CROP_CONTENT', default=False, cast=cast_bool),
+
+		# The size to resize the images to
+		'SIZE': get_env('GMM_DIGITS.IMG.SIZE', cast=lambda x: tuple(map(int, x.split(',')))),
+
+	},
+
 }
 
 
-def main_gmm(images: np.ndarray) -> None:
+def process_images(images: np.ndarray) -> np.ndarray:
+	# slice the image to 100x100
+	# img = img[16:112, 16:112]
+
+	og_size = images[0].shape
+
+	# invert images
+	if invert := my_env['IMG']['INVERT']:
+		print('Inverting images...')
+		images = 255 - images
+
+	# crop image
+	if invert and my_env['IMG']['CROP_CONTENT']:
+		print('Cropping content...')
+		images = (img_crop_content(img) for img in images)
+
+	# resize image
+	if size := my_env['IMG']['SIZE']:
+		print(f'Resizing images to {size}...')
+		images = (cv.resize(img, size) for img in images)
+	else:
+		my_env['IMG']['SIZE'] = og_size
+
+	# flatten image
+	images = (img.flatten() for img in images)
+
+	return np.asarray(list(images))
+
+
+def get_train_images() -> ndarray:
+	path = os.path.abspath(my_env['SAMPLE']['DATA_PATH'])
+	paths = [os.path.join(path, 'train', str(i)) for i in range(10)]
+
+	# Get train images
+	return gather_images(
+		paths,
+		limit=my_env['SAMPLE']['LIMIT_TRAIN'],
+		shuffle=False,
+		process_all=process_images,
+	)
+
+
+def get_test_images() -> ndarray:
+	path = os.path.abspath(my_env['SAMPLE']['DATA_PATH'])
+	paths = [os.path.join(path, 'test', str(i)) for i in range(10)]
+
+	# Get test images
+	return gather_images(
+		paths,
+		limit=my_env['SAMPLE']['LIMIT_TEST'],
+		shuffle=False,
+		process_all=process_images,
+	)
+
+
+def do_training(reduced_images: np.ndarray) -> GaussianMixture:
 	gmm: GaussianMixture
+
+	print('Training...')
 
 	# Fit the GMM to the data
 	gmm = GaussianMixture(
 		n_components=my_env['GMM']['N_COMPONENTS'],
 		covariance_type=my_env['GMM']['COVAR_TYPE'],
-		init_params='k-means++',
+		init_params=my_env['GMM']['INIT_PARAMS'],
 		n_init=my_env['GMM']['N_INIT'],
 		verbose=2,
 	)
-	gmm.fit(images)
+	gmm.fit(reduced_images)
 
-	# Print whether the model converged
-	print(f'Converged: {gmm.converged_}')
+	print('Done training.')
 
-	if my_env['SHOW_CENTROIDS']:
-		show_centroids(gmm)
+	return gmm
 
-	# Get test images
-	test_images = get_test_images(
-		invert=True,
-		crop_content=True,
-		size=(48, 48),
-	)
 
-	print('Calculating probabilities...')
+def do_testing(model: GaussianMixture, centroids_assignments: tuple[list[int]], reduced_images: np.ndarray) -> None:
+	print('Testing...')
 
 	# Predict the labels of the test images
-	probs = gmm.score(test_images)
+	labels = model.predict(reduced_images)
 
-	for i, img in enumerate(test_images):
+	correct = [0 for _ in range(10)]
+
+	# Assume the test images are ordered by digit
+	for i, label in enumerate(labels):
+		digit = i // (len(reduced_images) // 10)
+		if label in centroids_assignments[digit]:
+			correct[digit] += 1
+
+	print(f'Accuracy: {sum(correct) / len(reduced_images):.2f}%')
+
+
+def do_testing_visual(model: GaussianMixture, reduced_images: np.ndarray, images: np.ndarray) -> None:
+	print('Testing...')
+
+	# Predict the labels of the test images
+	probs = model.predict_proba(reduced_images)
+
+	size = my_env['IMG']['SIZE']
+
+	for i, img in enumerate(images):
 		# Get the probability of the image being in each cluster
 		cluster_probs = probs[i]
 
 		# Scale the image
-		img = img_scale(img.reshape((48, 48)), my_env['IMG_SCALE'])
+		img = img_scale(img.reshape(size), my_env['IMG_SCALE'])
 
 		# Print index and probabilities on the image
 		cv.putText(img, f'#{i}', (0, 15), cv.FONT_HERSHEY_SIMPLEX, 0.5, 255)
@@ -68,14 +207,35 @@ def main_gmm(images: np.ndarray) -> None:
 	cv.destroyAllWindows()
 
 
+def assign_centroids(gmm: GaussianMixture) -> tuple[list[int]]:
+	# Get the cluster means
+	centroids = gmm.means_
+
+	assignments = tuple([] for _ in range(10))
+	for label, centroid in enumerate(centroids):
+		# Ask the user to assign the label to a digit
+		assignments[int(input(f'Assign centroid {label} to digit: '))].append(label)
+
+	# noinspection PyTypeChecker
+	return assignments
+
+
 def show_centroids(
+		pca: PCA,
 		gmm: GaussianMixture,
+		scaler: StandardScaler = None,
 		size: tuple[int, int] = None,
 		wait_key: bool = True,
 		destroy: bool = False
 ) -> None:
 	# Get the cluster means
 	centroids = gmm.means_
+	# Project the centroids to the original space
+	centroids = pca.inverse_transform(centroids)
+
+	if scaler:
+		centroids = scaler.inverse_transform(centroids)
+
 	# Convert the centroids to uint8
 	centroids = centroids.astype(np.uint8)
 
@@ -102,111 +262,99 @@ def show_centroids(
 			cv.destroyWindow(window)
 
 
-def get_train_images(
-		invert: bool = True,
-		crop_content: bool = False,
-		size: tuple[int, int] = None,
+def gather_images(
+		paths: str | Iterable[str],
+		limit: int = 0,
+		process_all: Callable[[np.ndarray], np.ndarray] = None,
+		shuffle: bool = False,
 ) -> np.ndarray:
 	print('Gathering images...')
 
-	# read images
-	grouped_digits = []
-	path_digits = os.path.abspath('../../assets/digits/train')
-	for i in range(10):
-		images = read_images(
-			os.path.join(path_digits, str(i)),
-			limit=my_env['SAMPLE_LIMIT'],
+	if isinstance(paths, str):
+		paths = [os.path.abspath(paths)]
+	else:
+		paths = [os.path.abspath(path) for path in paths]
+
+	print(f'Limiting to {limit} images x {len(paths)} folders -> {limit * len(paths)} images.')
+
+	img_subsets = []
+	for path in paths:
+		imgs = read_images(
+			path,
+			limit=limit,
 			flatten=False,
 		)
-		grouped_digits.append(images)
+		img_subsets.append(imgs)
 
-	# concatenate digits
-	digits = np.concatenate(grouped_digits)
+	# unroll the subsets
+	images = np.concatenate(img_subsets)
+
 	# shuffle images
-	np.random.shuffle(digits)
+	if shuffle:
+		print('Shuffling images...')
+		np.random.shuffle(images)
 
-	print('Processing images...')
+	# apply preprocessing
+	if process_all:
+		print('Processing images...')
+		images = process_all(images)
 
-	# image processing pipeline
-	processed_digits = []
-	for i, img in enumerate(digits):
-		# slice the image to 100x100
-		img = img[16:112, 16:112]
-		# invert image
-		if invert:
-			img = 255 - img
-		# crop image
-		if invert and crop_content:
-			img = img_crop_content(img)
-		# resize image
-		if size:
-			img = cv.resize(img, size)
-		# flatten image
-		img = img.flatten()
-		# append image
-		processed_digits.append(img)
+	print('Done.')
 
-	print('Gathered images.')
-
-	return np.asarray(processed_digits)
+	return images
 
 
-def get_test_images(
-		invert: bool = True,
-		crop_content: bool = False,
-		size: tuple[int, int] = None,
-) -> np.ndarray:
-	print('Gathering images...')
+def pca_reduction(train_images: np.ndarray) -> tuple[np.ndarray, PCA, StandardScaler]:
+	pca: PCA
 
-	# read images
-	grouped_digits = []
-	path_digits = os.path.abspath('../../assets/digits/test')
-	for i in range(10):
-		images = read_images(
-			os.path.join(path_digits, str(i)),
-			limit=my_env['TEST_SAMPLE_LIMIT'],
-			flatten=False,
-		)
-		grouped_digits.append(images)
+	print('Performing Principal Component Analysis...')
 
-	# concatenate digits
-	digits = np.concatenate(grouped_digits)
-	# shuffle images
-	np.random.shuffle(digits)
+	# Standardize the images
+	scaler = StandardScaler()
+	std_images = scaler.fit_transform(train_images)
 
-	print('Processing images...')
+	# noinspection PyTypeChecker
+	pca = PCA().fit(std_images)
+	plt.plot(np.cumsum(pca.explained_variance_ratio_))
+	plt.xlabel('number of components')
+	plt.ylabel('cumulative explained variance')
 
-	# image processing pipeline
-	processed_digits = []
-	for i, img in enumerate(digits):
-		# slice the image to 100x100
-		img = img[16:112, 16:112]
-		# invert image
-		if invert:
-			img = 255 - img
-		# crop image
-		if invert and crop_content:
-			img = img_crop_content(img)
-		# resize image
-		if size:
-			img = cv.resize(img, size)
-		# flatten image
-		img = img.flatten()
-		# append image
-		processed_digits.append(img)
+	# get the top component that explains 95% of the variance
+	n_components = np.argmax(np.cumsum(pca.explained_variance_ratio_) >= 0.95) + 1
 
-	print('Gathered images.')
+	print(f'95% variance: {n_components} components.')
 
-	return np.asarray(processed_digits)
+	# noinspection PyTypeChecker
+	pca = PCA(n_components=n_components)
+	return pca.fit_transform(std_images), pca, scaler
 
 
 def main() -> None:
-	digits = get_train_images(
-		invert=True,
-		crop_content=True,
-		size=(48, 48),
-	)
-	main_gmm(digits)
+	# Get the training images
+	images = get_train_images()
+
+	# Reduce the images using PCA
+	reduced_images, pca, scaler = pca_reduction(images)
+
+	# Train the model
+	model = do_training(reduced_images)
+
+	# Print whether the model converged
+	print(f'Converged: {model.converged_}')
+
+	if my_env['SHOW_CENTROIDS'] or my_env['DO_TEST']:
+		# Show the centroids
+		show_centroids(pca, model, scaler=scaler, wait_key=True, destroy=False)
+
+	if my_env['DO_TEST']:
+		# Get the test images
+		test_images = get_test_images()
+
+		# Reduce the test images using PCA
+		reduced_test_images = pca.transform(test_images)
+
+		# Test the model
+		do_testing(model, assign_centroids(model), reduced_test_images)
 
 
 if __name__ == "__main__":
